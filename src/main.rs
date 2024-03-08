@@ -2,20 +2,36 @@
 #![no_std]
 
 use core::arch::asm;
+use core::ffi::c_void;
+use core::ptr::null;
 use log::info;
-use uefi::{prelude::*, CStr16};
+use uefi::proto::console::gop::{GraphicsOutput, PixelFormat};
+use uefi::{prelude::*, CStr16, Identify};
 use uefi::proto::console::text::Color;
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::media::file::{File, FileAttribute, FileInfo, FileMode};
 use uefi::proto::media::fs::SimpleFileSystem;
-use uefi::table::boot::{AllocateType, MemoryType};
+use uefi::table::boot::{AllocateType, MemoryType, SearchType};
 
 pub mod utils;
-
+pub mod gop;
+use gop::*;
 
 #[entry]
 fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     uefi_services::init(&mut system_table).unwrap();
+    // とりあえず初期化。
+    // ＴＯＤＯ：この汚いコードを書き換えたい。
+    let mut gop_info = GopInfo {
+        frame_buffer: null(),
+        holizontal_resolution: 0,
+        vertical_resolution: 0,
+        stride: 0,
+        pixel_format: FfiPixelFormat::Rgb,
+    };
+
+    // system_tableをexit_boot_servicesでmoveできるようにくくってある。
+    // もっといい書き方を探し中。
     {
         // 画面の初期設定を行う
         let _ = system_table.stdout().set_color(Color::White, Color::Black);
@@ -97,7 +113,57 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
 
         // ファイルは読み出しが成功したので、closeしておく。
         kernel_file.close();
+        
+        let gop_handles = system_table
+            .boot_services()
+            .locate_handle_buffer(SearchType::ByProtocol(&GraphicsOutput::GUID))
+            .unwrap();
+
+        // 何故かQEMUだとGOPが2つ見つかり、1つ目のGOPをopenするとripがさまよってしまう、、。
+        // とりあえず、gop_handlesの後ろから取ってくればうまくいったので、これでどうにかしようと思う。
+        info!("gop_handles.len(): {}", gop_handles.len());
+        let mut gop = system_table
+            .boot_services()
+            .open_protocol_exclusive::<GraphicsOutput>(*gop_handles.last().unwrap())
+            .unwrap();
+
+        let mode_info = gop.current_mode_info();
+        info!("resolution: {:?}", mode_info.resolution());
+        info!("pixel format: {:?}", mode_info.pixel_format());
+        info!("stride: {:?}", mode_info.stride());
+
+        let mut frame_buffer = gop.frame_buffer();
+        let frame_buffer_ptr = frame_buffer.as_mut_ptr();
+        info!("frame_buffer: {:?}", frame_buffer);
+        info!("frame_buffer_ptr: {:p}", frame_buffer_ptr);
+        
+        unsafe {
+            for i in 0..100 {
+                for j in 0..100 {
+                    frame_buffer.write_value((1024 * i + j) * 4, 0xff);
+                    frame_buffer.write_value((1024 * i + j) * 4 + 1, 0xff);
+                    frame_buffer.write_value((1024 * i + j) * 4 + 2, 0xff);
+                    frame_buffer.write_value((1024 * i + j) * 4 + 3, 0xff);
+                }
+            }
+        }
+        gop_info.frame_buffer = frame_buffer.as_mut_ptr() as *const c_void;
+        gop_info.holizontal_resolution = mode_info.resolution().0;
+        gop_info.vertical_resolution = mode_info.resolution().1;
+        gop_info.stride = mode_info.stride();
+        gop_info.pixel_format = match mode_info.pixel_format() {
+            PixelFormat::Rgb => FfiPixelFormat::Rgb,
+            PixelFormat::Bgr => FfiPixelFormat::Bgr,
+            pf => panic!("Undefined Pixed Format {:?}", pf)
+        };
     }
+
+    info!("gop_info.frame_buffer: {:p}", gop_info.frame_buffer);
+    info!("gop_info.holizontal_resolution: {}", gop_info.holizontal_resolution);
+    info!("gop_info.vertical_resolution: {}", gop_info.vertical_resolution);
+    info!("gop_info.stride: {}", gop_info.stride);
+
+    clear_screen(&gop_info);
 
     // ＴＯＤＯ：kernelに渡すboot parameterをここでいろいろと読み出しておく必要があるが、、、
     
@@ -110,6 +176,7 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
 
     // カーネルのエントリポイントへジャンプ！！
     unsafe {
+        asm!("mov rdi, {}", in(reg) &gop_info as *const GopInfo as *const u8);
         asm!("jmp {}", in(reg) 0x100000 as *const u8, options(noreturn));
     };
 }
