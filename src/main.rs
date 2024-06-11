@@ -137,16 +137,6 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         info!("frame_buffer: {:?}", frame_buffer);
         info!("frame_buffer_ptr: {:p}", frame_buffer_ptr);
         
-        unsafe {
-            for i in 0..100 {
-                for j in 0..100 {
-                    frame_buffer.write_value((1024 * i + j) * 4, 0xff);
-                    frame_buffer.write_value((1024 * i + j) * 4 + 1, 0xff);
-                    frame_buffer.write_value((1024 * i + j) * 4 + 2, 0xff);
-                    frame_buffer.write_value((1024 * i + j) * 4 + 3, 0xff);
-                }
-            }
-        }
         gop_info.frame_buffer = frame_buffer.as_mut_ptr() as *const c_void;
         gop_info.holizontal_resolution = mode_info.resolution().0;
         gop_info.vertical_resolution = mode_info.resolution().1;
